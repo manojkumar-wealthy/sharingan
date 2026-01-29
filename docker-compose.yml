@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  # Market Pulse API
+  market-pulse-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: market-pulse-api
+    ports:
+      - "8000:8000"
+    environment:
+      - GOOGLE_AI_API_KEY=${GOOGLE_AI_API_KEY}
+      - GEMINI_FAST_MODEL=${GEMINI_FAST_MODEL:-gemini-2.0-flash-exp}
+      - GEMINI_PRO_MODEL=${GEMINI_PRO_MODEL:-gemini-1.5-pro}
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ENABLE_CACHING=${ENABLE_CACHING:-true}
+      - ENABLE_TRACING=${ENABLE_TRACING:-true}
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      # Mount for development (optional, remove in production)
+      - ./app:/app/app:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - market-pulse-network
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: market-pulse-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - market-pulse-network
+
+  # Redis Commander (optional, for development)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: market-pulse-redis-commander
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    profiles:
+      - dev
+    networks:
+      - market-pulse-network
+
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  market-pulse-network:
+    driver: bridge
