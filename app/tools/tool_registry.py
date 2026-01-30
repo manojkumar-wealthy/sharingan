@@ -36,9 +36,9 @@ class ToolRegistry:
         """Get tools for User Context Agent."""
         return get_user_data_tools()
 
-    def get_user_data_handlers(self) -> Dict[str, Callable]:
-        """Get tool handlers for User Context Agent."""
-        return get_user_data_tool_handlers()
+    # def get_user_data_handlers(self) -> Dict[str, Callable]:
+    #     """Get tool handlers for User Context Agent."""
+    #     return get_user_data_tool_handlers()
 
     def get_analysis_tools(self) -> List[Any]:
         """Get tools for Impact Analysis Agent."""
