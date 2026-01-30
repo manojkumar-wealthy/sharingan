@@ -15,7 +15,14 @@ import json
 import pytz
 
 from app.config import get_settings
-from app.services.cmots_news_service import CMOTSNewsService, fetch_world_indices, get_cmots_news_service
+from app.constants.themes import (
+    MAX_THEMED_NEWS_ITEMS,
+    normalize_theme_to_allowed,
+)
+from app.services.cmots_news_service import (
+    fetch_world_indices,
+    get_market_news_service,
+)
 from app.utils.logging import get_logger
 from app.agents.summary_generation_agent import SummaryGenerationAgent
 
@@ -588,7 +595,7 @@ async def fetch_market_news(
 
     try:
         # Fetch from CMOTS API
-        news_service = get_cmots_news_service()
+        news_service = get_market_news_service()
         api_response = await news_service.fetch_unified_market_news(
             limit=max_articles,
             page=1,
@@ -726,114 +733,109 @@ async def cluster_news_by_topic(
     news_items: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
-    Cluster news items into themes/topics.
+    Cluster news items into themes using only allowed themes (max 5).
 
-    Groups news by:
-    1. News type (Economy, Other Markets, Foreign Markets)
-    2. Primary sector from mentioned_sectors
-
-    Args:
-        news_items: List of news articles to cluster
-
-    Returns:
-        List of theme clusters with sentiment analysis
+    Groups news by news_type and sector, maps each to an allowed theme via
+    normalize_theme_to_allowed, aggregates by allowed theme, and returns
+    up to MAX_THEMED_NEWS_ITEMS themes (impacted in post-market / pre-market).
     """
-    # Group by news_type first, then by sector
+    # Raw groups: news_type -> news_ids, sector -> news_ids
     type_groups: Dict[str, List[str]] = {}
     sector_groups: Dict[str, List[str]] = {}
 
     for article in news_items:
         article_id = article.get("id", "")
-
-        # Group by news type
         news_type = article.get("news_type", "General")
         if news_type:
-            if news_type not in type_groups:
-                type_groups[news_type] = []
-            type_groups[news_type].append(article_id)
-
-        # Also group by mentioned sectors
+            type_groups.setdefault(news_type, []).append(article_id)
         sectors = article.get("mentioned_sectors", ["General"])
         primary_sector = sectors[0] if sectors else "General"
+        sector_groups.setdefault(primary_sector, []).append(article_id)
 
-        if primary_sector not in sector_groups:
-            sector_groups[primary_sector] = []
-        sector_groups[primary_sector].append(article_id)
+    # Build candidate themes and map to allowed theme
+    candidates: List[tuple] = []
 
-    themes = []
+    def add_candidate(raw_name: str, news_ids: List[str], cluster_articles: List[Dict]) -> None:
+        if not cluster_articles:
+            return
+        allowed = normalize_theme_to_allowed(raw_name)
+        if not allowed:
+            return
+        avg_sentiment = sum(a.get("sentiment_score", 0) for a in cluster_articles) / len(cluster_articles)
+        if avg_sentiment > 0.2:
+            sentiment = "bullish"
+        elif avg_sentiment < -0.2:
+            sentiment = "bearish"
+        else:
+            sentiment = "neutral"
+        mentioned_stocks = set()
+        for a in cluster_articles:
+            mentioned_stocks.update(a.get("mentioned_stocks", []))
+        confidence = min(0.7 + (0.05 * len(news_ids)), 0.95)
+        candidates.append((allowed, news_ids, sentiment, mentioned_stocks, confidence))
 
-    # Create themes from news type groups
     for news_type, news_ids in type_groups.items():
         cluster_articles = [a for a in news_items if a.get("id") in news_ids]
-        if not cluster_articles:
-            continue
-
-        avg_sentiment = sum(a.get("sentiment_score", 0) for a in cluster_articles) / len(cluster_articles)
-
-        if avg_sentiment > 0.2:
-            sentiment = "bullish"
-        elif avg_sentiment < -0.2:
-            sentiment = "bearish"
-        else:
-            sentiment = "neutral"
-
-        mentioned_stocks = set()
-        for article in cluster_articles:
-            mentioned_stocks.update(article.get("mentioned_stocks", []))
-
-        # Generate descriptive theme name
-        theme_name = f"{news_type} News"
+        raw_name = f"{news_type} News"
         if news_type == "Economy":
-            theme_name = "Economic & Policy Updates"
+            raw_name = "Economic & Policy Updates"
         elif news_type == "Other Markets":
-            theme_name = "Commodities & Forex"
+            raw_name = "Commodities & Forex"
         elif news_type == "Foreign Markets":
-            theme_name = "Global Market Updates"
+            raw_name = "Global Market Updates"
+        add_candidate(raw_name, news_ids, cluster_articles)
 
-        themes.append({
-            "theme_name": theme_name,
-            "news_ids": news_ids,
-            "confidence": min(0.7 + (0.05 * len(news_ids)), 0.95),
-            "mentioned_stocks": list(mentioned_stocks),
-            "sentiment": sentiment,
-            "avg_sentiment_score": round(avg_sentiment, 2),
-            "news_type": news_type,
-        })
-
-    # Add sector-based themes that aren't already covered
+    skip_sectors = {"Economy", "Macro", "Policy", "Commodities", "Forex", "Bullion", "Global Markets", "International"}
     for sector, news_ids in sector_groups.items():
-        # Skip if already covered by news_type themes
-        if sector in ["Economy", "Macro", "Policy", "Commodities", "Forex", "Bullion", "Global Markets", "International"]:
+        if sector in skip_sectors:
             continue
-
         cluster_articles = [a for a in news_items if a.get("id") in news_ids]
-        if not cluster_articles:
-            continue
+        add_candidate(f"{sector} Update", news_ids, cluster_articles)
 
-        avg_sentiment = sum(a.get("sentiment_score", 0) for a in cluster_articles) / len(cluster_articles)
+    # Aggregate by allowed theme: merge news_ids and average sentiment
+    by_allowed: Dict[str, Dict[str, Any]] = {}
+    for allowed_name, news_ids, sentiment, mentioned_stocks, confidence in candidates:
+        if allowed_name not in by_allowed:
+            by_allowed[allowed_name] = {
+                "theme_name": allowed_name,
+                "news_ids": [],
+                "mentioned_stocks": set(),
+                "sentiment_scores": [],
+                "confidence_sum": 0.0,
+                "count": 0,
+            }
+        rec = by_allowed[allowed_name]
+        rec["news_ids"] = list(set(rec["news_ids"]) | set(news_ids))
+        rec["mentioned_stocks"] |= mentioned_stocks
+        rec["sentiment_scores"].append(sentiment)
+        rec["confidence_sum"] += confidence
+        rec["count"] += 1
 
-        if avg_sentiment > 0.2:
+    themes = []
+    for allowed_name, rec in by_allowed.items():
+        news_ids = rec["news_ids"]
+        sentiment_scores = rec["sentiment_scores"]
+        bullish = sum(1 for s in sentiment_scores if s == "bullish")
+        bearish = sum(1 for s in sentiment_scores if s == "bearish")
+        if bullish > bearish:
             sentiment = "bullish"
-        elif avg_sentiment < -0.2:
+        elif bearish > bullish:
             sentiment = "bearish"
         else:
             sentiment = "neutral"
-
-        mentioned_stocks = set()
-        for article in cluster_articles:
-            mentioned_stocks.update(article.get("mentioned_stocks", []))
-
+        confidence = min(rec["confidence_sum"] / max(rec["count"], 1), 0.95)
         themes.append({
-            "theme_name": f"{sector} Update",
+            "theme_name": allowed_name,
             "news_ids": news_ids,
-            "confidence": min(0.6 + (0.05 * len(news_ids)), 0.9),
-            "mentioned_stocks": list(mentioned_stocks),
+            "confidence": round(confidence, 2),
+            "mentioned_stocks": list(rec["mentioned_stocks"]),
             "sentiment": sentiment,
-            "avg_sentiment_score": round(avg_sentiment, 2),
+            "avg_sentiment_score": 0.0,
         })
 
-    # Sort by number of news items (most populated themes first)
-    return sorted(themes, key=lambda x: len(x["news_ids"]), reverse=True)
+    # Sort by number of news items (most populated first), return max 5
+    themes = sorted(themes, key=lambda x: len(x["news_ids"]), reverse=True)
+    return themes[:MAX_THEMED_NEWS_ITEMS]
 
 
 # =============================================================================

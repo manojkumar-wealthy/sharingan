@@ -637,11 +637,6 @@ async def log_analytics(
             news_count=len(response.all_news),
             themes_count=len(response.themed_news),
             degraded_mode=response.degraded_mode,
-            execution_time_ms=(
-                response.metrics.total_execution_time_ms
-                if response.metrics
-                else None
-            ),
         )
     except Exception as e:
         logger.warning(

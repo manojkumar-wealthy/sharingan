@@ -17,8 +17,14 @@ from app.agents.market_intelligence_agent import MarketIntelligenceAgent
 from app.agents.portfolio_insight_agent import PortfolioInsightAgent
 from app.agents.summary_generation_agent import SummaryGenerationAgent
 from app.config import get_settings
+from app.constants.themes import MAX_THEMED_NEWS_ITEMS, normalize_theme_to_allowed
 from app.models.requests import MarketPulseRequest
-from app.models.responses import MarketPulseResponse
+from app.models.responses import (
+    MarketPulseResponse,
+    ThemedNewsItem,
+    _news_item_to_response,
+    _news_with_impact_to_response,
+)
 from app.models.agent_schemas import (
     MarketIntelligenceAgentInput,
     PortfolioInsightAgentInput,
@@ -34,6 +40,36 @@ from app.utils.exceptions import OrchestrationError
 
 
 logger = get_logger(__name__)
+
+
+def _build_themed_news_list(
+    refined_themes: list,
+    market_phase: str,
+) -> List[ThemedNewsItem]:
+    """
+    Build themed_news for API: only pre/post market, max 5 items, allowed themes only.
+
+    Themed news represents themes impacted in post-market and will be impacted in pre-market.
+    """
+    if market_phase not in ("pre", "post"):
+        return []
+    items: List[ThemedNewsItem] = []
+    for theme in refined_themes[:MAX_THEMED_NEWS_ITEMS]:
+        allowed = normalize_theme_to_allowed(theme.theme_name)
+        if not allowed:
+            continue
+        reason = (theme.causal_summary or "").strip() or f"{allowed}: {theme.overall_sentiment} sentiment"
+        items.append(
+            ThemedNewsItem(
+                theme_name=allowed,
+                sentiment=theme.overall_sentiment,
+                theme=allowed,
+                reason=reason,
+            )
+        )
+        if len(items) >= MAX_THEMED_NEWS_ITEMS:
+            break
+    return items
 
 
 class OrchestratorAgent:
@@ -353,6 +389,9 @@ class OrchestratorAgent:
         market_phase = market_intelligence_output.market_phase if market_intelligence_output else "mid"
         is_mid_market = market_phase == "mid"
 
+        # Log metrics (not sent in API response)
+        self._log_metrics(context, metrics)
+
         return MarketPulseResponse(
             generated_at=datetime.utcnow(),
             request_id=context.request_id,
@@ -375,20 +414,22 @@ class OrchestratorAgent:
             executive_summary=(
                 summary_output.executive_summary if summary_output else None
             ),
-            # Mid-Market Section
+            # Mid-Market Section (single-layer; exclude url, sentiment_score, relevance_score)
             trending_now=(
-                summary_output.trending_now_section
+                [_news_item_to_response(n) for n in (summary_output.trending_now_section or [])]
                 if summary_output and is_mid_market
                 else None
             ),
-            # News & Themes
+            # News & Themes (pre/post only; max 5 allowed themes)
             themed_news=(
-                portfolio_insight_output.refined_themes
-                if portfolio_insight_output
-                else []
+                _build_themed_news_list(
+                    portfolio_insight_output.refined_themes if portfolio_insight_output else [],
+                    market_phase,
+                )
             ),
+            # Single-layer; exclude url, sentiment_score, relevance_score, impact_confidence
             all_news=(
-                portfolio_insight_output.news_with_impacts
+                [_news_with_impact_to_response(nwi) for nwi in portfolio_insight_output.news_with_impacts]
                 if portfolio_insight_output
                 else []
             ),
@@ -413,10 +454,22 @@ class OrchestratorAgent:
                 if portfolio_insight_output and portfolio_insight_output.portfolio_level_impact
                 else None
             ),
-            # Metadata
-            metrics=metrics,
+            # Metadata (metrics logged below, not in response)
             degraded_mode=degraded_mode,
             warnings=warnings,
+        )
+
+    def _log_metrics(self, context: AgentExecutionContext, metrics: OrchestrationMetrics) -> None:
+        """Log orchestration metrics for monitoring; not sent in API response."""
+        logger.info(
+            "orchestration_metrics",
+            request_id=context.request_id,
+            total_execution_time_ms=metrics.total_execution_time_ms,
+            agent_execution_times=metrics.agent_execution_times,
+            agents_succeeded=metrics.agents_succeeded,
+            agents_failed=metrics.agents_failed,
+            degraded_mode=metrics.degraded_mode,
+            cache_hits=metrics.cache_hits,
         )
 
     def _generate_fallback_response(
