@@ -209,3 +209,43 @@ def get_mongodb_client() -> MongoDBClient:
     if _mongodb_client is None:
         _mongodb_client = MongoDBClient()
     return _mongodb_client
+
+
+def reset_mongodb_client() -> None:
+    """
+    Reset the MongoDB client singleton and all repository singletons.
+    
+    Use this in Celery tasks before connecting to ensure
+    the client binds to the current event loop.
+    """
+    global _mongodb_client
+    
+    # Clear the internal state without async disconnect
+    if MongoDBClient._client is not None:
+        try:
+            MongoDBClient._client.close()
+        except Exception:
+            pass
+    MongoDBClient._client = None
+    MongoDBClient._db = None
+    MongoDBClient._instance = None
+    _mongodb_client = None
+    
+    # Also reset repository singletons to prevent stale references
+    try:
+        from app.db.repositories.snapshot_repository import reset_snapshot_repository
+        reset_snapshot_repository()
+    except ImportError:
+        pass
+    
+    try:
+        from app.db.repositories.news_repository import reset_news_repository
+        reset_news_repository()
+    except ImportError:
+        pass
+    
+    try:
+        from app.db.repositories.indices_repository import reset_indices_repository
+        reset_indices_repository()
+    except ImportError:
+        pass

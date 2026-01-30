@@ -26,11 +26,23 @@ IST = pytz.timezone("Asia/Kolkata")
 
 def run_async(coro):
     """Helper to run async code in sync Celery tasks."""
+    # Reset MongoDB client to bind to fresh event loop
+    from app.db.mongodb import reset_mongodb_client
+    reset_mongodb_client()
+    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(coro)
     finally:
+        # Clean up MongoDB connections before closing loop
+        try:
+            from app.db.mongodb import get_mongodb_client
+            mongo_client = get_mongodb_client()
+            if mongo_client._client is not None:
+                loop.run_until_complete(mongo_client.disconnect())
+        except Exception:
+            pass
         loop.close()
 
 

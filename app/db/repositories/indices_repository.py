@@ -28,13 +28,10 @@ class IndicesRepository:
     - Time-series analysis queries
     """
 
-    def __init__(self):
-        self._client = get_mongodb_client()
-
     @property
     def collection(self):
-        """Get the indices_timeseries collection."""
-        return self._client.get_collection(COLLECTION_NAME)
+        """Get the indices_timeseries collection (fresh client reference each time)."""
+        return get_mongodb_client().get_collection(COLLECTION_NAME)
 
     async def create(self, document: IndicesTimeseriesDocument) -> str:
         """
@@ -270,3 +267,9 @@ def get_indices_repository() -> IndicesRepository:
     if _indices_repository is None:
         _indices_repository = IndicesRepository()
     return _indices_repository
+
+
+def reset_indices_repository() -> None:
+    """Reset the indices repository singleton (for Celery tasks)."""
+    global _indices_repository
+    _indices_repository = None

@@ -43,3 +43,4 @@ build/
 credentials.json
 *.pem
 *.key
+celerybeat-schedule

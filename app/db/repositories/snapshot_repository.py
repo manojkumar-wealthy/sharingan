@@ -26,13 +26,10 @@ class SnapshotRepository:
     - TTL-based expiration management
     """
 
-    def __init__(self):
-        self._client = get_mongodb_client()
-
     @property
     def collection(self):
-        """Get the market_snapshots collection."""
-        return self._client.get_collection(COLLECTION_NAME)
+        """Get the market_snapshots collection (fresh client reference each time)."""
+        return get_mongodb_client().get_collection(COLLECTION_NAME)
 
     async def create(self, document: MarketSnapshotDocument) -> str:
         """
@@ -256,3 +253,9 @@ def get_snapshot_repository() -> SnapshotRepository:
     if _snapshot_repository is None:
         _snapshot_repository = SnapshotRepository()
     return _snapshot_repository
+
+
+def reset_snapshot_repository() -> None:
+    """Reset the snapshot repository singleton (for Celery tasks)."""
+    global _snapshot_repository
+    _snapshot_repository = None

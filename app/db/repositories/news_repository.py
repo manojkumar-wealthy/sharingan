@@ -30,13 +30,10 @@ class NewsRepository:
     - Deduplication checks
     """
 
-    def __init__(self):
-        self._client = get_mongodb_client()
-
     @property
     def collection(self):
-        """Get the news_articles collection."""
-        return self._client.get_collection(COLLECTION_NAME)
+        """Get the news_articles collection (fresh client reference each time)."""
+        return get_mongodb_client().get_collection(COLLECTION_NAME)
 
     async def create(self, document: NewsArticleDocument) -> str:
         """
@@ -399,3 +396,9 @@ def get_news_repository() -> NewsRepository:
     if _news_repository is None:
         _news_repository = NewsRepository()
     return _news_repository
+
+
+def reset_news_repository() -> None:
+    """Reset the news repository singleton (for Celery tasks)."""
+    global _news_repository
+    _news_repository = None
