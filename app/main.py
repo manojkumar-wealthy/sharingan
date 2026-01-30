@@ -8,7 +8,7 @@ a simplified 3-agent orchestration system.
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +30,7 @@ from app.utils.tracing import setup_tracing
 from app.utils.exceptions import MarketPulseError, OrchestrationError
 from app.services.redis_service import get_redis_service
 from app.services.cmots_news_service import fetch_world_indices, get_cmots_news_service
+from app.services.company_news_service import get_company_news_service
 
 
 # Initialize settings and logging
@@ -446,6 +447,63 @@ async def get_mid_market_news(
             status_code=500,
             detail={
                 "error": "MID_MARKET_NEWS_ERROR",
+                "message": str(e),
+            },
+        )
+
+
+@app.post(
+    "/api/v1/company-news",
+    summary="Company-wise News",
+    description="Fetch news for multiple companies by NSE symbols with concurrency",
+)
+async def get_company_wise_news(
+    nse_symbols: List[str],
+    page: int = 1,
+    per_page: int = 10,
+    limit: int = 10,
+):
+    """
+    Get company-wise news for multiple NSE symbols.
+
+    Request Body:
+    - nse_symbols: List of NSE symbols (e.g., ["RELIANCE", "TCS", "INFY"])
+
+    Query Parameters:
+    - page: Page number (1-indexed, default: 1)
+    - per_page: Items per page (1-100, default: 10)
+    - limit: Number of news items per company (default: 10)
+
+    Response includes:
+    - data: News organized by NSE symbol
+    - pagination: Pagination metadata
+    - symbols_found: List of valid symbols found
+    - symbols_not_found: List of invalid symbols
+    - errors: Any errors encountered
+    """
+    logger.info(
+        "company_news_request",
+        nse_symbols=nse_symbols,
+        page=page,
+        per_page=per_page,
+        limit=limit,
+    )
+
+    try:
+        company_news_service = get_company_news_service()
+        response = await company_news_service.fetch_company_news_by_symbols(
+            nse_symbols=nse_symbols,
+            limit=limit,
+            page=page,
+            per_page=per_page,
+        )
+        return response
+    except Exception as e:
+        logger.error("company_news_error", error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "COMPANY_NEWS_ERROR",
                 "message": str(e),
             },
         )
