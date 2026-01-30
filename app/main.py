@@ -28,7 +28,7 @@ from app.models.responses import (
 from app.utils.logging import setup_logging, get_logger, bind_request_context
 from app.utils.tracing import setup_tracing
 from app.utils.exceptions import MarketPulseError, OrchestrationError
-from app.services.cmots_news_service import fetch_unified_market_news, fetch_news_by_type
+from app.services.cmots_news_service import fetch_unified_market_news, fetch_news_by_type, fetch_world_indices
 
 
 # Initialize settings and logging
@@ -381,6 +381,42 @@ async def get_news_by_type(
                 "error": "NEWS_FETCH_ERROR",
                 "message": str(e),
                 "news_type": news_type,
+            },
+        )
+
+
+@app.get(
+    "/api/v1/world-indices",
+    summary="World Indices",
+    description="Fetch current world market indices data",
+)
+async def get_world_indices():
+    """
+    Get world market indices data.
+
+    Returns data for global market indices including:
+    - Index name and symbol
+    - Current value, change, and percentage change
+    - Open, high, low values
+    - Last updated timestamp
+
+    Response includes:
+    - data: Array of world indices
+    - total_count: Number of indices returned
+    - fetched_at: Timestamp of data fetch
+    """
+    logger.info("world_indices_request")
+
+    try:
+        response = await fetch_world_indices()
+        return response
+    except Exception as e:
+        logger.error("world_indices_error", error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "WORLD_INDICES_ERROR",
+                "message": str(e),
             },
         )
 

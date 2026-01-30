@@ -212,3 +212,54 @@ async def fetch_news_by_type(
             source=f"cmots_api/{news_type}",
             message=str(e),
         ) from e
+
+
+async def fetch_world_indices() -> Dict[str, Any]:
+    """
+    Fetch world indices data from CMOTS API.
+
+    Returns data for global market indices including:
+    - Index name and symbol
+    - Current value, change, and percentage change
+    - Open, high, low values
+    - Last updated timestamp
+
+    Returns:
+        Dictionary with world indices data and metadata
+    """
+    url = "https://wealthyapis.cmots.com/api/WorldIndices"
+
+    try:
+        logger.info("fetching_world_indices", url=url)
+
+        response = await call_funds_proxy(
+            method="get",
+            url=url,
+            payload=None,
+        )
+
+        # Extract indices data from response
+        indices = response.get("data", [])
+        logger.info("fetched_world_indices_count", count=len(indices))
+
+        return {
+            "data": indices,
+            "total_count": len(indices),
+            "fetched_at": datetime.utcnow().isoformat(),
+        }
+
+    except DataFetchError as e:
+        logger.error(
+            "world_indices_fetch_error",
+            error=str(e),
+        )
+        raise
+    except Exception as e:
+        logger.error(
+            "unexpected_world_indices_error",
+            error=str(e),
+        )
+        raise DataFetchError(
+            source="cmots_api/world_indices",
+            message=str(e),
+        ) from e
