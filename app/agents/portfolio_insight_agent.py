@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 
 from app.agents.base import BaseAgent, AgentConfig, AgentExecutionContext
 from app.config import get_settings
+from app.constants.themes import MAX_THEMED_NEWS_ITEMS, normalize_theme_to_allowed
 from app.models.agent_schemas import (
     PortfolioInsightAgentInput,
     PortfolioInsightAgentOutput,
@@ -537,10 +538,14 @@ class PortfolioInsightAgent(BaseAgent[PortfolioInsightAgentInput, PortfolioInsig
         watchlist: set,
         portfolio: set,
     ) -> List[ThemeGroup]:
-        """Refine themes with impact analysis."""
+        """Refine themes with impact analysis; only allowed themes, max 5."""
         refined: List[ThemeGroup] = []
 
-        for idx, theme in enumerate(preliminary_themes[:5]):
+        for idx, theme in enumerate(preliminary_themes[:MAX_THEMED_NEWS_ITEMS]):
+            allowed_name = normalize_theme_to_allowed(theme.theme_name)
+            if not allowed_name:
+                continue
+
             theme_news = [
                 nwi.news_item for nwi in news_with_impacts
                 if nwi.news_id in theme.news_ids
@@ -564,13 +569,13 @@ class PortfolioInsightAgent(BaseAgent[PortfolioInsightAgentInput, PortfolioInsig
             refined.append(
                 ThemeGroup(
                     theme_id=f"theme_{idx:03d}",
-                    theme_name=theme.theme_name,
+                    theme_name=allowed_name,
                     theme_description=f"Theme covering {len(theme_news)} related news items",
                     news_items=theme_news,
                     overall_sentiment=theme.sentiment,
                     impacted_sectors=list(impacted_sectors),
                     impacted_stocks=list(impacted_stocks),
-                    causal_summary=f"{theme.theme_name}: {theme.sentiment} sentiment",
+                    causal_summary=f"{allowed_name}: {theme.sentiment} sentiment",
                     relevance_to_user=round(relevance, 2),
                 )
             )
