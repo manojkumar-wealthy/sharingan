@@ -10,6 +10,10 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+# Module-level constant: Pydantic v2 treats class attributes starting with _
+# as PrivateAttr descriptors, so use a plain constant for membership checks.
+VALID_IMPACT_TYPES = frozenset({"positive", "negative", "neutral"})
+
 
 class ImpactedStockDocument(BaseModel):
     """Stock impacted by a news article."""
@@ -118,7 +122,21 @@ class NewsArticleDocument(BaseModel):
     def from_mongo_dict(cls, data: Dict[str, Any]) -> "NewsArticleDocument":
         """Create instance from MongoDB document."""
         # Remove MongoDB's _id field if present
+        data = dict(data)
         data.pop("_id", None)
+        # Normalize impact_type in impacted_stocks (e.g. legacy 'mixed' -> 'neutral')
+        for item in data.get("impacted_stocks") or []:
+            if isinstance(item, dict):
+                it = item.get("impact_type")
+                if it not in VALID_IMPACT_TYPES:
+                    item["impact_type"] = "neutral"
+        # Normalize sector_impacts values
+        sector_impacts = data.get("sector_impacts")
+        if isinstance(sector_impacts, dict):
+            data["sector_impacts"] = {
+                k: v if v in VALID_IMPACT_TYPES else "neutral"
+                for k, v in sector_impacts.items()
+            }
         return cls(**data)
 
     @classmethod

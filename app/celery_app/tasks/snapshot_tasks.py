@@ -99,6 +99,9 @@ async def _generate_snapshot_async(
     from app.services.market_intelligence_service import (
         get_market_phase,
         fetch_market_indices,
+        fetch_phase_specific_news,
+        _filter_indices_by_phase,
+        phase_news_to_documents,
     )
     from app.agents import get_snapshot_generation_agent
     
@@ -113,6 +116,16 @@ async def _generate_snapshot_async(
     if not market_phase:
         phase_data = await get_market_phase()
         market_phase = phase_data["phase"]
+    
+    # When phase changes: generate new snapshot if latest current-phase snapshot
+    # does not exist (we generate below when no valid snapshot for this phase).
+    latest_any = await snapshot_repo.get_latest()
+    latest_valid_current = await snapshot_repo.get_latest_valid(market_phase)
+    if latest_any and not latest_valid_current and latest_any.market_phase != market_phase:
+        logger.info(
+            f"phase_change_detected: previous_phase={latest_any.market_phase}, "
+            f"current_phase={market_phase}, generating_new_snapshot"
+        )
     
     # Check if we need to generate (unless forced)
     if not force:
@@ -130,11 +143,45 @@ async def _generate_snapshot_async(
                     "market_phase": market_phase,
                 }
     
-    # Fetch indices data
-    indices_data = await fetch_market_indices()
+    # Fetch indices and filter by market phase (pre/mid/post)
+    all_indices_data = await fetch_market_indices()
+    indices_data = _filter_indices_by_phase(all_indices_data, market_phase)
     
-    # Fetch recent news (last 4 hours)
-    recent_news = await news_repo.get_recent(hours=4, limit=50, analyzed_only=True)
+    # Fetch phase-specific news (pre/mid/post market commentary) for snapshot
+    phase_news_raw = await fetch_phase_specific_news(
+        phase=market_phase,
+        max_articles=50,
+    )
+    phase_news_docs = phase_news_to_documents(phase_news_raw)
+    if phase_news_docs:
+        recent_news = phase_news_docs
+        logger.info(
+            f"using_phase_specific_news: phase={market_phase}, count={len(recent_news)}"
+        )
+    else:
+        # Fallback to recent news from DB if phase-specific fetch is empty
+        recent_news = await news_repo.get_recent(hours=4, limit=50, analyzed_only=True)
+        logger.info(
+            f"phase_specific_news_empty_using_db: phase={market_phase}, count={len(recent_news)}"
+        )
+    
+    # Fetch previous snapshot for context continuity
+    previous_snapshot = None
+    previous_snapshot_doc = await snapshot_repo.get_latest(market_phase)
+    if previous_snapshot_doc:
+        # Convert to dict format for the prompt
+        previous_snapshot = {
+            "market_outlook": previous_snapshot_doc.market_outlook.model_dump() 
+                if previous_snapshot_doc.market_outlook else None,
+            "market_summary": [
+                bullet.model_dump() for bullet in (previous_snapshot_doc.market_summary or [])
+            ],
+            "executive_summary": previous_snapshot_doc.executive_summary,
+        }
+        logger.info(
+            f"previous_snapshot_found: phase={market_phase}, "
+            f"snapshot_id={previous_snapshot_doc.snapshot_id}"
+        )
     
     # Generate snapshot content using SnapshotGenerationAgent (AI-powered)
     agent = get_snapshot_generation_agent()
@@ -142,6 +189,7 @@ async def _generate_snapshot_async(
         market_phase=market_phase,
         indices_data=indices_data,
         news_items=recent_news,
+        previous_snapshot=previous_snapshot,
     )
     
     # Create snapshot document

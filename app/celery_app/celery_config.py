@@ -70,15 +70,15 @@ celery_app.conf.update(
 
 # Periodic task schedule (Celery Beat)
 celery_app.conf.beat_schedule = {
-    # Fetch and process news every 15 minutes
-    "fetch-news-every-15-min": {
+    # Fetch and process news every 3 minutes
+    "fetch-news-every-3-min": {
         "task": "app.celery_app.tasks.news_tasks.fetch_and_process_news",
         "schedule": settings.NEWS_FETCH_INTERVAL,
         "options": {"queue": "news"},
     },
     
-    # Generate market snapshot every 30 minutes
-    "generate-snapshot-every-30-min": {
+    # Generate market snapshot every 5 minutes
+    "generate-snapshot-every-5-min": {
         "task": "app.celery_app.tasks.snapshot_tasks.generate_market_snapshot",
         "schedule": settings.SNAPSHOT_GENERATION_INTERVAL,
         "options": {"queue": "snapshots"},

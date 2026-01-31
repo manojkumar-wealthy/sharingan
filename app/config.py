@@ -70,8 +70,8 @@ class Settings(BaseSettings):
     CELERY_TASK_SOFT_TIME_LIMIT: int = 240  # 4 minutes
 
     # Task Schedules (in seconds)
-    NEWS_FETCH_INTERVAL: int = 900  # 15 minutes
-    SNAPSHOT_GENERATION_INTERVAL: int = 1800  # 30 minutes
+    NEWS_FETCH_INTERVAL: int = 180  # 3 minutes
+    SNAPSHOT_GENERATION_INTERVAL: int = 300  # 5 minutes
     INDICES_FETCH_INTERVAL: int = 300  # 5 minutes
 
     # Data Retention

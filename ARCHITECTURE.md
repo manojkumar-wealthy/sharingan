@@ -1,4 +1,4 @@
-# Market Intelligence System - Clean Architecture
+# Market Pulse Engine
 
 > **Last Updated:** Project cleanup completed - removed real-time agent code, keeping only background processing architecture.
 
@@ -16,35 +16,35 @@ This system provides real-time market intelligence through a background processi
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                       MongoDB                                    │
-│  ┌──────────────────┐  ┌────────────────┐  ┌─────────────────┐ │
-│  │  market_snapshots │  │ news_articles  │  │indices_timeseries│ │
+│                       MongoDB                                   │
+│  ┌──────────────────┐  ┌────────────────┐  ┌─────────────────┐  │
+│  │  market_snapshots │  │ news_articles  │  │indices_timeseries││
 │  │  (TTL: 15 min)    │  │ (90 day retain)│  │ (90 day TTL)    │ │
-│  └──────────────────┘  └────────────────┘  └─────────────────┘ │
+│  └──────────────────┘  └────────────────┘  └─────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
                               ▲
                               │
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Celery Tasks (Background)                     │
-│  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────┐ │
-│  │fetch_news (15m) │  │gen_snapshot (30m)│  │fetch_indices   │ │
-│  │                 │  │                  │  │(5m market hrs) │ │
-│  └────────┬────────┘  └────────┬─────────┘  └───────┬────────┘ │
+│                    Celery Tasks (Background)                    │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────┐  │
+│  │fetch_news (3m)  │  │gen_snapshot (5m) │  │fetch_indices   │  │
+│  │                 │  │                  │  │(5m market hrs) │  │
+│  └────────┬────────┘  └────────┬─────────┘  └───────┬────────┘  │
 │           │                    │                     │          │
 │           ▼                    ▼                     ▼          │
-│  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────┐ │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────┐  │
 │  │NewsProcessing   │  │SnapshotGeneration│  │IndicesCollection│
-│  │Agent (Gemini)   │  │Agent (Gemini)    │  │Agent           │ │
-│  └─────────────────┘  └──────────────────┘  └────────────────┘ │
+│  │Agent (Gemini)   │  │Agent (Gemini)    │  │Agent           │  │
+│  └─────────────────┘  └──────────────────┘  └────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
                               ▲
                               │
 ┌─────────────────────────────────────────────────────────────────┐
-│                     Data Sources (CMOTS API)                     │
-│  ┌─────────────────┐  ┌──────────────┐  ┌─────────────────────┐│
-│  │ News APIs       │  │ World Indices│  │ Company News        ││
-│  │ (6 categories)  │  │              │  │                     ││
-│  └─────────────────┘  └──────────────┘  └─────────────────────┘│
+│                     Data Sources (CMOTS API)                    │
+│  ┌─────────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
+│  │ News APIs       │  │ World Indices│  │ Company News        │ │
+│  │ (6 categories)  │  │              │  │                     │ │
+│  └─────────────────┘  └──────────────┘  └─────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -59,7 +59,7 @@ This system provides real-time market intelligence through a background processi
 - Summary generation
 - Impact analysis with causal chains
 
-**Called by:** `fetch_and_process_news` Celery task (every 15 minutes)
+**Called by:** `fetch_and_process_news` Celery task (every 3 minutes)
 
 **AI Integration:** Uses Gemini via `NewsProcessorService`
 
@@ -72,7 +72,7 @@ This system provides real-time market intelligence through a background processi
 - Executive summary generation
 - Trending news selection (mid-market)
 
-**Called by:** `generate_market_snapshot` Celery task (every 30 minutes)
+**Called by:** `generate_market_snapshot` Celery task (every 5 minutes)
 
 **AI Integration:** Uses Gemini via `SnapshotGeneratorService`
 
@@ -91,8 +91,8 @@ This system provides real-time market intelligence through a background processi
 
 | Task | Interval | Agent | Purpose |
 |------|----------|-------|---------|
-| `fetch_and_process_news` | 15 min | NewsProcessingAgent | Fetch news, dedupe, AI analyze |
-| `generate_market_snapshot` | 30 min | SnapshotGenerationAgent | Generate aggregated snapshot |
+| `fetch_and_process_news` | 3 min | NewsProcessingAgent | Fetch news, dedupe, AI analyze |
+| `generate_market_snapshot` | 5 min | SnapshotGenerationAgent | Generate aggregated snapshot |
 | `fetch_indices_data` | 5 min | IndicesCollectionAgent | Store historical indices |
 | `cleanup_old_data` | Daily 2 AM | - | Archive old data |
 
@@ -140,9 +140,14 @@ CMOTS API → fetch_and_process_news → NewsProcessingAgent (AI) → MongoDB
 
 ### Snapshot Generation Flow
 ```
-MongoDB (news + indices) → generate_market_snapshot → SnapshotGenerationAgent (AI) → MongoDB
+MongoDB (news + indices + previous_snapshot) → generate_market_snapshot → SnapshotGenerationAgent (AI) → MongoDB
 ```
 
+**Context Continuity:** When generating a new snapshot, the system fetches the latest existing snapshot for the same market phase (pre/mid/post) and includes it as context for the AI. This allows:
+- Building upon previous analysis with new developments
+- Avoiding repetition of already-covered points
+- Maintaining narrative continuity across snapshots
+  
 ### API Response Flow
 ```
 API Request → MongoDB (snapshot) → Response (< 200ms)
@@ -154,8 +159,8 @@ Key settings in `app/config.py`:
 
 ```python
 # Task Schedules
-NEWS_FETCH_INTERVAL = 900        # 15 minutes
-SNAPSHOT_GENERATION_INTERVAL = 1800  # 30 minutes
+NEWS_FETCH_INTERVAL = 180        # 3 minutes
+SNAPSHOT_GENERATION_INTERVAL = 300   # 5 minutes
 INDICES_FETCH_INTERVAL = 300     # 5 minutes
 
 # Data Retention
@@ -200,6 +205,8 @@ curl "http://localhost:8000/api/v1/market-summary"
 
 1. **Separation of Concerns:** API serves cached data, background tasks handle heavy processing
 2. **Graceful Degradation:** Rule-based fallbacks when AI fails
-3. **Deduplication:** News articles deduplicated by `news_id` (sno from API)
-4. **TTL Management:** MongoDB handles automatic expiration
-5. **Market Awareness:** Indices collection respects market hours
+3. **Structured Output:** Pydantic models validate AI responses with type safety and automatic normalization
+4. **Deduplication:** News articles deduplicated by `news_id` (sno from API)
+5. **TTL Management:** MongoDB handles automatic expiration
+6. **Market Awareness:** Indices collection respects market hours
+7. **Context Continuity:** Snapshots build upon previous phase snapshots for narrative consistency

@@ -21,6 +21,7 @@ from app.constants.themes import (
     normalize_theme_to_allowed,
 )
 from app.constants.tickers import COMMON_NSE_TICKERS
+from app.db.models.news_document import NewsArticleDocument
 from app.services.cmots_news_service import (
     fetch_world_indices,
     get_cmots_news_service,
@@ -1006,6 +1007,64 @@ async def fetch_phase_specific_news(
             error=str(e),
         )
         return []
+
+
+def phase_news_to_documents(
+    phase_news: List[Dict[str, Any]],
+) -> List[NewsArticleDocument]:
+    """
+    Convert phase-specific news (transformed dicts) to NewsArticleDocument list.
+
+    Used when generating snapshots so the snapshot is based on phase-specific
+    news (pre/mid/post market commentary).
+
+    Args:
+        phase_news: List of transformed news dicts from fetch_phase_specific_news
+
+    Returns:
+        List of NewsArticleDocument for snapshot generation
+    """
+    documents: List[NewsArticleDocument] = []
+    for item in phase_news:
+        try:
+            pub_at = datetime.utcnow()
+            raw = item.get("published_at")
+            if raw:
+                if isinstance(raw, datetime):
+                    pub_at = raw
+                else:
+                    pub_at = datetime.fromisoformat(
+                        str(raw).replace("Z", "+00:00")
+                    )
+                if pub_at.tzinfo is not None:
+                    pub_at = pub_at.astimezone(pytz.UTC).replace(tzinfo=None)
+            sentiment = (item.get("sentiment") or "neutral").lower()
+            if sentiment not in ("bullish", "bearish", "neutral"):
+                sentiment = "neutral"
+            doc = NewsArticleDocument(
+                news_id=str(item.get("id", "")),
+                headline=item.get("headline", ""),
+                summary=item.get("summary", ""),
+                full_text=item.get("summary", ""),
+                source=item.get("source", "Capital Market"),
+                source_url=item.get("url"),
+                published_at=pub_at,
+                sentiment=sentiment,
+                sentiment_score=float(item.get("sentiment_score", 0.0)),
+                mentioned_stocks=item.get("mentioned_stocks", []),
+                mentioned_sectors=item.get("mentioned_sectors", []),
+                news_type=item.get("news_type", ""),
+                processed=True,
+                analyzed=True,
+            )
+            documents.append(doc)
+        except Exception as e:
+            logger.warning(
+                "phase_news_to_document_skip",
+                item_id=item.get("id"),
+                error=str(e),
+            )
+    return documents
 
 
 async def fetch_market_intelligence(

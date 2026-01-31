@@ -8,8 +8,10 @@ Provides:
 - Trending news selection
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 import json
+
+from pydantic import BaseModel, Field, field_validator
 
 from app.config import get_settings
 from app.db.models.news_document import NewsArticleDocument
@@ -28,6 +30,192 @@ CAUSAL_KEYWORDS = [
 ]
 
 
+# ============================================================================
+# Structured Output Models for AI Response
+# ============================================================================
+
+class MarketOutlookResponse(BaseModel):
+    """Structured response for market outlook from AI."""
+    sentiment: Literal["bullish", "bearish", "neutral"] = Field(
+        default="neutral",
+        description="Overall market sentiment"
+    )
+    confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score between 0 and 1"
+    )
+    reasoning: str = Field(
+        default="",
+        description="2-3 sentence explanation of the outlook"
+    )
+    key_drivers: List[str] = Field(
+        default_factory=list,
+        description="List of key market drivers"
+    )
+    
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def clamp_confidence(cls, v):
+        """Ensure confidence is within valid range."""
+        try:
+            val = float(v)
+            return max(0.0, min(1.0, val))
+        except (TypeError, ValueError):
+            return 0.5
+    
+    @field_validator("sentiment", mode="before")
+    @classmethod
+    def normalize_sentiment(cls, v):
+        """Normalize sentiment to valid values."""
+        if isinstance(v, str):
+            v_lower = v.lower().strip()
+            if v_lower in ("bullish", "positive", "up"):
+                return "bullish"
+            elif v_lower in ("bearish", "negative", "down"):
+                return "bearish"
+        return "neutral"
+
+
+class MarketSummaryBulletResponse(BaseModel):
+    """Structured response for a single summary bullet."""
+    text: str = Field(
+        default="",
+        description="Summary text with causal language"
+    )
+    supporting_news_ids: List[str] = Field(
+        default_factory=list,
+        description="IDs of supporting news articles"
+    )
+    confidence: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score"
+    )
+    sentiment: Literal["bullish", "bearish", "neutral"] = Field(
+        default="neutral",
+        description="Sentiment of this bullet point"
+    )
+    
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def clamp_confidence(cls, v):
+        """Ensure confidence is within valid range."""
+        try:
+            val = float(v)
+            return max(0.0, min(1.0, val))
+        except (TypeError, ValueError):
+            return 0.7
+    
+    @field_validator("sentiment", mode="before")
+    @classmethod
+    def normalize_sentiment(cls, v):
+        """Normalize sentiment to valid values."""
+        if isinstance(v, str):
+            v_lower = v.lower().strip()
+            if v_lower in ("bullish", "positive", "up"):
+                return "bullish"
+            elif v_lower in ("bearish", "negative", "down"):
+                return "bearish"
+        return "neutral"
+
+
+class SnapshotAIResponse(BaseModel):
+    """Complete structured response from AI for snapshot generation."""
+    market_outlook: Optional[MarketOutlookResponse] = Field(
+        default=None,
+        description="Market outlook analysis"
+    )
+    market_summary: List[MarketSummaryBulletResponse] = Field(
+        default_factory=list,
+        description="List of summary bullets"
+    )
+    executive_summary: str = Field(
+        default="",
+        description="2-3 sentence executive summary"
+    )
+    
+    @classmethod
+    def from_raw_response(
+        cls,
+        data: Dict[str, Any],
+        nifty_change: float = 0.0,
+    ) -> "SnapshotAIResponse":
+        """
+        Parse raw AI response dict into structured model.
+        
+        Handles missing fields, type mismatches, and invalid values gracefully.
+        """
+        try:
+            # Parse market outlook
+            outlook = None
+            if data.get("market_outlook"):
+                outlook_data = data["market_outlook"]
+                outlook = MarketOutlookResponse(
+                    sentiment=outlook_data.get("sentiment", "neutral"),
+                    confidence=outlook_data.get("confidence", 0.5),
+                    reasoning=outlook_data.get("reasoning", ""),
+                    key_drivers=outlook_data.get("key_drivers", []),
+                )
+            
+            # Parse market summary bullets
+            bullets = []
+            if data.get("market_summary"):
+                for bullet_data in data["market_summary"]:
+                    if isinstance(bullet_data, dict) and bullet_data.get("text"):
+                        bullets.append(MarketSummaryBulletResponse(
+                            text=bullet_data.get("text", ""),
+                            supporting_news_ids=bullet_data.get("supporting_news_ids", []),
+                            confidence=bullet_data.get("confidence", 0.7),
+                            sentiment=bullet_data.get("sentiment", "neutral"),
+                        ))
+            
+            # Parse executive summary
+            exec_summary = data.get("executive_summary", "")
+            if not isinstance(exec_summary, str):
+                exec_summary = str(exec_summary) if exec_summary else ""
+            
+            return cls(
+                market_outlook=outlook,
+                market_summary=bullets,
+                executive_summary=exec_summary,
+            )
+            
+        except Exception:
+            # Return empty response on any parsing error
+            return cls()
+    
+    def to_snapshot_dict(self, nifty_change: float = 0.0) -> Dict[str, Any]:
+        """Convert to dict format expected by snapshot document."""
+        result: Dict[str, Any] = {
+            "market_outlook": None,
+            "market_summary": [],
+            "executive_summary": self.executive_summary or None,
+        }
+        
+        if self.market_outlook:
+            result["market_outlook"] = {
+                "sentiment": self.market_outlook.sentiment,
+                "confidence": self.market_outlook.confidence,
+                "reasoning": self.market_outlook.reasoning,
+                "nifty_change_percent": nifty_change,
+                "key_drivers": self.market_outlook.key_drivers,
+            }
+        
+        for bullet in self.market_summary:
+            if bullet.text:
+                result["market_summary"].append({
+                    "text": bullet.text,
+                    "supporting_news_ids": bullet.supporting_news_ids,
+                    "confidence": bullet.confidence,
+                    "sentiment": bullet.sentiment,
+                })
+        
+        return result
+
+
 class SnapshotGeneratorService:
     """
     Service for generating market snapshots with AI.
@@ -41,9 +229,9 @@ class SnapshotGeneratorService:
     
     def __init__(self):
         self.client = VertexAIClient(
-            model_name=settings.GEMINI_FAST_MODEL,
+            model_name=settings.GEMINI_PRO_MODEL,
             temperature=0.3,  # Slightly creative for narrative
-            max_output_tokens=4096,
+            max_output_tokens=5000,
         )
         self.logger = get_logger("snapshot_generator")
 
@@ -52,6 +240,7 @@ class SnapshotGeneratorService:
         market_phase: str,
         indices_data: Dict[str, Any],
         news_items: List[NewsArticleDocument],
+        previous_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Generate complete snapshot content.
@@ -60,6 +249,7 @@ class SnapshotGeneratorService:
             market_phase: Current market phase (pre/mid/post)
             indices_data: Current indices data
             news_items: Recent news articles
+            previous_snapshot: Previous snapshot for same phase (for context continuity)
             
         Returns:
             Dict with snapshot content
@@ -81,18 +271,27 @@ class SnapshotGeneratorService:
             result["executive_summary"] = "Market activity ongoing. Key developments being monitored."
         else:
             # Pre/Post market: Generate full analysis
-            try:
-                ai_result = await self._generate_ai_snapshot(
+            ai_result = await self._generate_ai_snapshot(
+                market_phase, indices_data, news_items, previous_snapshot
+            )
+            
+            if ai_result:
+                result.update(ai_result)
+                self.logger.info(
+                    "snapshot_generated_with_ai",
+                    market_phase=market_phase,
+                )
+            else:
+                # Fall back to rule-based generation
+                self.logger.info(
+                    "snapshot_fallback_to_rules",
+                    market_phase=market_phase,
+                    reason="AI generation failed or returned empty",
+                )
+                fallback_result = self._generate_rule_based_snapshot(
                     market_phase, indices_data, news_items
                 )
-                if ai_result:
-                    result.update(ai_result)
-            except Exception as e:
-                self.logger.warning("ai_snapshot_failed", error=str(e))
-                # Fall back to rule-based
-                result.update(self._generate_rule_based_snapshot(
-                    market_phase, indices_data, news_items
-                ))
+                result.update(fallback_result)
         
         return result
 
@@ -101,19 +300,69 @@ class SnapshotGeneratorService:
         market_phase: str,
         indices_data: Dict[str, Any],
         news_items: List[NewsArticleDocument],
+        previous_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Generate snapshot using AI."""
-        prompt = self._build_snapshot_prompt(market_phase, indices_data, news_items)
+        """
+        Generate snapshot using AI with graceful error handling.
+        
+        Returns:
+            Dict with snapshot content on success, None on failure.
+            Caller should fall back to rule-based generation on None.
+        """
+        self.logger.info(
+            "ai_snapshot_generation_started",
+            market_phase=market_phase,
+            news_count=len(news_items),
+            has_previous=previous_snapshot is not None,
+        )
+        
+        prompt = self._build_snapshot_prompt(
+            market_phase, indices_data, news_items, previous_snapshot
+        )
         
         try:
             response = await self.client.generate_content(prompt)
+            
             if not response:
+                self.logger.warning(
+                    "ai_snapshot_empty_response",
+                    market_phase=market_phase,
+                )
                 return None
             
-            return self._parse_snapshot_response(response, indices_data)
+            result = self._parse_snapshot_response(response, indices_data)
+            
+            if result:
+                self.logger.info(
+                    "ai_snapshot_generation_success",
+                    market_phase=market_phase,
+                    has_outlook=result.get("market_outlook") is not None,
+                    bullet_count=len(result.get("market_summary", [])),
+                )
+            else:
+                self.logger.warning(
+                    "ai_snapshot_parse_failed",
+                    market_phase=market_phase,
+                    message="Response parsing returned None, will use fallback",
+                )
+            
+            return result
+            
+        except TimeoutError as e:
+            self.logger.error(
+                "ai_snapshot_timeout",
+                market_phase=market_phase,
+                error=str(e),
+            )
+            return None
             
         except Exception as e:
-            self.logger.warning("ai_snapshot_error", error=str(e))
+            self.logger.error(
+                "ai_snapshot_error",
+                market_phase=market_phase,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
             return None
 
     def _build_snapshot_prompt(
@@ -121,6 +370,7 @@ class SnapshotGeneratorService:
         market_phase: str,
         indices_data: Dict[str, Any],
         news_items: List[NewsArticleDocument],
+        previous_snapshot: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Build prompt for snapshot generation."""
         # Format indices data
@@ -138,100 +388,196 @@ class SnapshotGeneratorService:
             news_text += f"- [{sentiment}] {item.headline}\n"
         
         phase_context = {
-            "pre": "Markets are about to open. Focus on overnight developments and opening expectations.",
-            "post": "Markets have closed. Summarize the day's key movements and drivers.",
+            "pre": "Pre-Market (07:00–09:15 IST). Focus on overnight developments and opening expectations. Market outlook is ALLOWED; derive it ONLY from NIFTY 50.",
+            "mid": "Mid-Market (09:15–15:30 IST). Do NOT generate market outlook. Focus on live, fast-moving developments and factual structure only.",
+            "post": "Post-Market (15:30–07:00 IST). Summarize the day's key movements and drivers. Market outlook is ALLOWED; derive it ONLY from NIFTY 50.",
         }
         
-        return f"""Generate a market snapshot for {market_phase}-market phase.
+        # Build previous snapshot context if available
+        previous_context = ""
+        if previous_snapshot:
+            previous_context = self._format_previous_snapshot_context(previous_snapshot)
+        
+        return f"""You are a Market Intelligence Agent specializing in Indian equity markets.
+Your role is to gather, analyze, and STRUCTURE market intelligence.
+
+CORE OBJECTIVE
+Convert fragmented market data and news into structured, factual intelligence that enables clear market context, noise reduction, and accurate stock/theme linkage.
+
+MARKET PHASE (MANDATORY)
+Current phase: {market_phase}-market.
+- Pre-Market: 07:00 – 09:15 IST
+- Mid-Market: 09:15 – 15:30 IST
+- Post-Market: 15:30 – 07:00 IST
+Market phase controls what signals are allowed downstream.
 
 {phase_context.get(market_phase, '')}
+
+MARKET OUTLOOK (STRICT RULES)
+- Compute market outlook ONLY in Pre-Market and Post-Market.
+- Market outlook is derived ONLY from NIFTY 50 movement.
+- Allowed values: bullish | bearish | neutral.
+- DO NOT generate market outlook when phase is Mid-Market.
+
+MARKET DATA
+Indian indices (primary): NIFTY 50, SENSEX, sectoral. Use for outlook and reasoning.
+Global indices are contextual only; they must NOT directly influence market outlook.
 
 Current Indices:
 {indices_text}
 
 Recent News:
 {news_text}
+{previous_context}
 
-Return a JSON object with:
-1. "market_outlook": {{
-     "sentiment": "bullish/bearish/neutral",
+CONSTRAINTS
+- No predictions. No trading advice.
+- Accuracy, structure, and restraint are critical.
+
+OUTPUT CONTRACT (STRICT)
+Return ONLY a valid JSON object with the following structure. No other text.
+
+1. "market_outlook": Include ONLY for pre or post phase. Omit or null for mid. {{
+     "sentiment": "bullish" | "bearish" | "neutral",
      "confidence": 0.0-1.0,
-     "reasoning": "2-3 sentence explanation",
+     "reasoning": "2-3 sentence factual explanation",
      "nifty_change_percent": number,
      "key_drivers": ["driver1", "driver2"]
    }}
 
-2. "market_summary": Array of 3 summary bullets, each with:
-   - "text": Summary with MANDATORY causal language (use: "due to", "driven by", "following", "amid", "on the back of")
+2. "market_summary": Array of exactly 3-5 bullets, each with:
+   - "text": Factual summary with MANDATORY causal language ("due to", "driven by", "following", "amid", "on the back of"). Explain WHY.
    - "supporting_news_ids": [list of relevant news IDs if known]
    - "confidence": 0.0-1.0
-   - "sentiment": "bullish/bearish/neutral"
-   
-   IMPORTANT: Each summary MUST contain causal language explaining WHY something happened.
+
+   - "sentiment": "bullish" | "bearish" | "neutral"
    Bad: "Markets closed higher"
    Good: "Markets closed higher driven by positive global cues following US market rally"
 
-3. "executive_summary": A 2-3 sentence overview of the market
+3. "executive_summary": A 2-3 sentence internal overview of the market (structured intelligence, not user-facing copy).
 
 Return ONLY valid JSON, no other text."""
+
+    def _format_previous_snapshot_context(
+        self,
+        previous_snapshot: Dict[str, Any],
+    ) -> str:
+        """Format previous snapshot for inclusion in prompt context."""
+        context_parts = ["\n--- PREVIOUS SNAPSHOT CONTEXT ---"]
+        context_parts.append(
+            "Build upon this previous analysis. Focus on NEW developments and changes. "
+            "Avoid repeating the same points unless they remain highly relevant."
+        )
+        
+        # Previous outlook
+        if previous_snapshot.get("market_outlook"):
+            outlook = previous_snapshot["market_outlook"]
+            context_parts.append(f"\nPrevious Sentiment: {outlook.get('sentiment', 'neutral')}")
+            if outlook.get("reasoning"):
+                context_parts.append(f"Previous Reasoning: {outlook['reasoning']}")
+            if outlook.get("key_drivers"):
+                drivers = ", ".join(outlook["key_drivers"][:3])
+                context_parts.append(f"Previous Key Drivers: {drivers}")
+        
+        # Previous summary bullets
+        if previous_snapshot.get("market_summary"):
+            context_parts.append("\nPrevious Summary Points:")
+            for i, bullet in enumerate(previous_snapshot["market_summary"][:3], 1):
+                text = bullet.get("text", "") if isinstance(bullet, dict) else str(bullet)
+                if text:
+                    context_parts.append(f"  {i}. {text}")
+        
+        # Previous executive summary
+        if previous_snapshot.get("executive_summary"):
+            context_parts.append(f"\nPrevious Executive Summary: {previous_snapshot['executive_summary']}")
+        
+        context_parts.append("--- END PREVIOUS CONTEXT ---\n")
+        
+        return "\n".join(context_parts)
 
     def _parse_snapshot_response(
         self,
         response: str,
         indices_data: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
-        """Parse AI response for snapshot."""
+        """
+        Parse AI response for snapshot using structured Pydantic models.
+        
+        Provides graceful handling of malformed responses by:
+        - Cleaning JSON formatting artifacts
+        - Using Pydantic models for type validation
+        - Falling back to empty/default values on parse errors
+        - Filtering bullets without causal language
+        """
+        # Get NIFTY change for context
+        nifty = indices_data.get("NIFTY", indices_data.get("SENSEX", {}))
+        nifty_change = nifty.get("change_percent", 0) if nifty else 0
+        
         try:
-            # Clean response
+            # Clean response - remove markdown code blocks
             text = response.strip()
             if text.startswith("```json"):
                 text = text[7:]
-            if text.startswith("```"):
+            elif text.startswith("```"):
                 text = text[3:]
             if text.endswith("```"):
                 text = text[:-3]
+            text = text.strip()
             
-            data = json.loads(text.strip())
+            # Parse JSON
+            data = json.loads(text)
             
-            result = {}
+            # Use structured model to parse and validate
+            structured_response = SnapshotAIResponse.from_raw_response(
+                data=data,
+                nifty_change=nifty_change,
+            )
             
-            # Parse market outlook
-            if data.get("market_outlook"):
-                outlook = data["market_outlook"]
-                # Get actual NIFTY change
-                nifty = indices_data.get("NIFTY", indices_data.get("SENSEX", {}))
-                nifty_change = nifty.get("change_percent", 0) if nifty else 0
-                
-                result["market_outlook"] = {
-                    "sentiment": outlook.get("sentiment", "neutral"),
-                    "confidence": float(outlook.get("confidence", 0.5)),
-                    "reasoning": outlook.get("reasoning", ""),
-                    "nifty_change_percent": nifty_change,
-                    "key_drivers": outlook.get("key_drivers", []),
-                }
+            # Convert to dict format
+            result = structured_response.to_snapshot_dict(nifty_change=nifty_change)
             
-            # Parse market summary
-            if data.get("market_summary"):
-                result["market_summary"] = []
-                for bullet in data["market_summary"]:
-                    text = bullet.get("text", "")
-                    # Validate causal language
-                    if self._has_causal_language(text):
-                        result["market_summary"].append({
-                            "text": text,
-                            "supporting_news_ids": bullet.get("supporting_news_ids", []),
-                            "confidence": float(bullet.get("confidence", 0.7)),
-                            "sentiment": bullet.get("sentiment", "neutral"),
-                        })
+            # Filter bullets: only keep those with causal language
+            if result.get("market_summary"):
+                result["market_summary"] = [
+                    bullet for bullet in result["market_summary"]
+                    if self._has_causal_language(bullet.get("text", ""))
+                ]
             
-            # Parse executive summary
-            if data.get("executive_summary"):
-                result["executive_summary"] = data["executive_summary"]
+            # Validate we have meaningful content
+            has_outlook = result.get("market_outlook") is not None
+            has_summary = len(result.get("market_summary", [])) > 0
+            has_executive = bool(result.get("executive_summary"))
+            
+            if not (has_outlook or has_summary or has_executive):
+                self.logger.warning(
+                    "snapshot_parse_empty",
+                    message="Parsed response has no meaningful content"
+                )
+                return None
+            
+            self.logger.info(
+                "snapshot_parsed_successfully",
+                has_outlook=has_outlook,
+                bullet_count=len(result.get("market_summary", [])),
+                has_executive=has_executive,
+            )
             
             return result
             
-        except (json.JSONDecodeError, ValueError, TypeError) as e:
-            self.logger.warning("snapshot_parse_error", error=str(e))
+        except json.JSONDecodeError as e:
+            self.logger.warning(
+                "snapshot_json_parse_error",
+                error=str(e),
+                response_preview=response[:200] if response else "empty"
+            )
+            return None
+            
+        except Exception as e:
+            self.logger.warning(
+                "snapshot_parse_error",
+                error=str(e),
+                error_type=type(e).__name__,
+            )
             return None
 
     def _generate_rule_based_snapshot(

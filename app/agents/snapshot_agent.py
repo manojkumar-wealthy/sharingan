@@ -48,6 +48,7 @@ class SnapshotGenerationAgent:
         market_phase: str,
         indices_data: Dict[str, Any],
         news_items: List[NewsArticleDocument],
+        previous_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Generate complete snapshot content using AI.
@@ -56,6 +57,7 @@ class SnapshotGenerationAgent:
             market_phase: Current market phase (pre/mid/post)
             indices_data: Current indices data from API
             news_items: Recent analyzed news articles
+            previous_snapshot: Previous snapshot for same phase (for context continuity)
             
         Returns:
             Dict with snapshot content:
@@ -69,6 +71,7 @@ class SnapshotGenerationAgent:
             market_phase=market_phase,
             indices_count=len(indices_data),
             news_count=len(news_items),
+            has_previous_snapshot=previous_snapshot is not None,
         )
         
         try:
@@ -76,6 +79,7 @@ class SnapshotGenerationAgent:
                 market_phase=market_phase,
                 indices_data=indices_data,
                 news_items=news_items,
+                previous_snapshot=previous_snapshot,
             )
             
             self.logger.info(
